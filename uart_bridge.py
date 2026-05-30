@@ -1,8 +1,8 @@
 import socket, serial, struct
 
 # listens for data on Simulink with this port
-UDP_PORT = 18002 # TODO CONFIRM: not clashing with :18000/:18001/:50005
-SERIAL_PORT = "/dev/ttyUSB0" # TODO CONFIRM: ls /dev/tty* on RPi
+UDP_PORT = 18002
+SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 
 # hardcoded fake ina readings...
@@ -46,4 +46,6 @@ while True:
     alt, roll, pitch, yaw, airspeed = struct.unpack('>5d', raw)
 
     # sends bytes using UART to TX pin on RPi which is connected to RX pin on ESP32
-    ser.write(build_packet(alt, roll, pitch, yaw, airspeed))
+    pkt = build_packet(alt, roll, pitch, yaw, airspeed)
+    print(f"Writing to ESP32: {[hex(b) for b in pkt]}")
+    ser.write(pkt)

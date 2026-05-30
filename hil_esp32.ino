@@ -58,6 +58,16 @@ void parsePacket(uint8_t* buf) {
     g_airspeed = (int16_t)((buf[9] << 8) | buf[10]);
     g_voltage_mv = (uint16_t)((buf[11] << 8) | buf[12]); // unsigned
     g_current_ma = (uint16_t)((buf[13] << 8) | buf[14]);
+    
+    Serial.print("[ESP32} alt=");
+    Serial.print(g_alt);
+    Serial.print(" roll=");
+    Serial.print(g_roll);
+    Serial.print(" pitch=");
+    Serial.print(g_pitch);
+    Serial.print(" yaw=");
+    Serial.print(g_yaw);
+    
 }
 
 // builds a packet from the global state variables and sends it to ZP over UART2
