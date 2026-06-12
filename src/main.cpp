@@ -113,9 +113,9 @@ void setup() {
   Serial.println("ESP32-S3 INA228 mock starting...");
 
   setupFakeINA228Registers();
+  Wire.begin(INA228_ADDR);
   Wire.onReceive(onReceive);
   Wire.onRequest(onRequest);
-  Wire.begin(INA228_ADDR);
 
   readRegister(REG_VBUS);
   readRegister(REG_CURRENT);
@@ -127,5 +127,6 @@ void setup() {
 }
 
 void loop() {
+  Serial.println("Looping...");
   delay(1000);
 }
