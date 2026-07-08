@@ -4,10 +4,10 @@ import struct
 import time
 import os
 from hil_config import AircraftState, JSBSIM_STATE_PORT, UDP_HOST
+from hil_config import PWM_TARGET_IP, PWM_TARGET_PORT, HOST_IP, HOST_PORT
+
 
 TARGET_IP = UDP_HOST;        TARGET_PORT = JSBSIM_STATE_PORT  # Send full AircraftState
-PWM_TARGET_IP = "127.0.0.1"; PWM_TARGET_PORT = 18005 # Send Control Inputs (PWM/HIL)
-HOST_IP   = "127.0.0.1";     HOST_PORT   = 18000  # Listen for Controls
 
 ROOT_DIR = "/home/pi/jsbsim_data" 
 AIRCRAFT = "c172x"
@@ -49,9 +49,6 @@ try:
         fdm['fcs/flap-cmd-norm']     = controls[3] #  0.0 to 1.0
         fdm['fcs/throttle-cmd-norm'] = controls[4] #  0.0 to 1.0
         
-
-        pwm_packet = struct.pack('ddddd', *controls)
-        sock_out.sendto(pwm_packet, (PWM_TARGET_IP, PWM_TARGET_PORT))
 
         fdm.run()
         

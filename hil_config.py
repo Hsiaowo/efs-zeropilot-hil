@@ -13,6 +13,13 @@ LEGACY_UART_BRIDGE_PORT = 18002
 # JSBSim receives normalized control inputs here.
 JSBSIM_CONTROL_PORT = 18000
 
+# HIL/flight server receives PWM control inputs here
+PWM_TARGET_PORT = 18005
+PWM_TARGET_IP = UDP_HOST
+HOST_IP = UDP_HOST
+HOST_PORT = JSBSIM_CONTROL_PORT
+
+
 SERIAL_PORT = "/dev/ttyACM0"
 PI_ESP32_BAUD = 115200
 
