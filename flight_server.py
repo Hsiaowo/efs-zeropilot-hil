@@ -3,10 +3,11 @@ import socket
 import struct
 import time
 import os
+from hil_config import AircraftState, JSBSIM_STATE_PORT, UDP_HOST
+from hil_config import PWM_TARGET_IP, PWM_TARGET_PORT, HOST_IP, HOST_PORT
 
-TARGET_IP = "127.0.0.1";     TARGET_PORT = 18001  # Send Flight State (Simulink/Vis)
-PWM_TARGET_IP = "127.0.0.1"; PWM_TARGET_PORT = 18005 # Send Control Inputs (PWM/HIL)
-HOST_IP   = "127.0.0.1";     HOST_PORT   = 18000  # Listen for Controls
+
+TARGET_IP = UDP_HOST;        TARGET_PORT = JSBSIM_STATE_PORT  # Send full AircraftState
 
 ROOT_DIR = "/home/pi/jsbsim_data" 
 AIRCRAFT = "c172x"
@@ -49,12 +50,9 @@ try:
         fdm['fcs/throttle-cmd-norm'] = controls[4] #  0.0 to 1.0
         
 
-        pwm_packet = struct.pack('ddddd', *controls)
-        sock_out.sendto(pwm_packet, (PWM_TARGET_IP, PWM_TARGET_PORT))
-
         fdm.run()
         
-        data_out = [
+        state = AircraftState.from_jsbsim_values([
             fdm['position/h-sl-ft'],       # 1. Alt
             fdm['velocities/vc-kts'],      # 2. Speed
             fdm['attitude/theta-deg'],     # 3. Pitch
@@ -65,9 +63,9 @@ try:
             fdm['accelerations/n-pilot-z-norm'], # 8. G-Force
             fdm['velocities/p-rad_sec'],   # 9. Roll Rate
             fdm['velocities/q-rad_sec']    # 10. Pitch Rate
-        ]
+        ])
         
-        packet = struct.pack('d' * len(data_out), *data_out)
+        packet = state.to_udp_payload()
         sock_out.sendto(packet, (TARGET_IP, TARGET_PORT))
         
         time.sleep(0.01)

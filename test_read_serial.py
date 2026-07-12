@@ -1,8 +1,10 @@
 import serial
 
-s = serial.Serial('/dev/ttyACM0', 115200)
+from hil_config import PI_ESP32_BAUD, SERIAL_PORT
+
+
+s = serial.Serial(SERIAL_PORT, PI_ESP32_BAUD)
 
 while True:
-	d = s.read_until(bytes([0x55]))
-	print([hex(b) for b in d])
-	print("---")
+    line = s.readline()
+    print(line.decode(errors="replace"), end="")

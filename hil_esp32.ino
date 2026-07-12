@@ -1,4 +1,6 @@
+#include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
 
 // from power_module.hpp: INA228_ADDR = 0b1000101 = 0x45, not 0x40
 #define I2C_ADDR 0x45
@@ -13,9 +15,50 @@
 #define ENERGY_LSB (16 * 3.2f * CURRENT_LSB)
 #define CHARGE_LSB CURRENT_LSB
 
-// global shared state (written by UART parser, read by I2C)
-// volatile because they change in the UART loop, don't want caches to mess stuff up
-volatile int16_t g_alt, g_roll, g_pitch, g_yaw, g_airspeed;
+// UART packet constants, must match hil_config.py / uart_bridge.py
+#define START 0xAA
+#define END 0x55
+#define MSG_AIRCRAFT_STATE 0x01
+#define AIRCRAFT_STATE_PAYLOAD_LEN 41  // type byte + 10 big-endian int32 values
+#define PKT_LEN (1 + AIRCRAFT_STATE_PAYLOAD_LEN + 1 + 1)
+
+// GPS serial output to ZeroPilot.
+// TODO: verify these pins against the actual wiring/schematic.
+// Classic ESP32 boards often use GPIO17(TX)/GPIO16(RX) for an extra UART, but ESP32-S3 pins are board-specific.
+#define GPS_TX_PIN 17  // ESP32 TX -> ZeroPilot GPS RX
+#define GPS_RX_PIN 16  // ESP32 RX <- ZeroPilot GPS TX, optional unless ZP expects bidirectional GPS
+#define GPS_BAUD 9600
+#define GPS_PERIOD_MS 200  // 5 Hz GPS spoof output
+
+HardwareSerial GPS(1);
+
+struct AircraftState {
+    float altitude_ft;
+    float airspeed_kts;
+    float pitch_deg;
+    float roll_deg;
+    float heading_deg;
+    float latitude_deg;
+    float longitude_deg;
+    float g_force;
+    float roll_rate_rad_s;
+    float pitch_rate_rad_s;
+};
+
+static AircraftState g_state = {
+    2000.0f,   // altitude_ft
+    55.0f,     // airspeed_kts
+    0.0f,      // pitch_deg
+    0.0f,      // roll_deg
+    0.0f,      // heading_deg
+    43.4723f,  // latitude_deg, default near Waterloo
+    -80.5449f, // longitude_deg
+    1.0f,      // g_force
+    0.0f,      // roll_rate_rad_s
+    0.0f       // pitch_rate_rad_s
+};
+
+static bool g_haveState = false;
 
 // from power_module.cpp: ZP reads charge and energy as accumulated values, so we accumulate over time
 static float fakeCharge = 0.0f;
@@ -23,11 +66,6 @@ static float fakeEnergy = 0.0f;
 
 // register ZP last requested
 static uint8_t g_reg = 0xFF;
-
-// UART packet constants, must match uart_bridge.py
-#define PKT_LEN 18
-#define START 0xAA
-#define END 0x55
 
 // from power_module.hpp: VBUS, CURRENT, POWER are 24 bit (3 bytes), ENERGY and CHARGE are 40 bit (5 bytes)
 void packU24(uint8_t* buf, uint32_t val) {
@@ -90,43 +128,127 @@ void onRequest() {
     }
 }
 
-void parsePacket(uint8_t* buf) {
-    // buf[0] = msg type (0x01), buf[1..10] = 5x int16, buf[11..14] = 2x uint16
-    g_alt      = (int16_t)((buf[1] << 8) | buf[2]);
-    g_roll     = (int16_t)((buf[3] << 8) | buf[4]);
-    g_pitch    = (int16_t)((buf[5] << 8) | buf[6]);
-    g_yaw      = (int16_t)((buf[7] << 8) | buf[8]);
-    g_airspeed = (int16_t)((buf[9] << 8) | buf[10]);
-    // dont need buf[11..14] voltage/current anymore bc ZP reads power data over I2C not UART
-
-    Serial.print("[ESP32] alt=");
-    Serial.print(g_alt);
-    Serial.print(" roll=");
-    Serial.print(g_roll);
-    Serial.print(" pitch=");
-    Serial.print(g_pitch);
-    Serial.print(" yaw=");
-    Serial.println(g_yaw);
+int32_t readI32BE(const uint8_t* p) {
+    return (int32_t)(
+        ((uint32_t)p[0] << 24) |
+        ((uint32_t)p[1] << 16) |
+        ((uint32_t)p[2] << 8) |
+        ((uint32_t)p[3])
+    );
 }
 
-void setup() {
-    Serial.begin(115200); // UART0: RPi to ESP32 via USB
+void parseAircraftStatePayload(const uint8_t* payload) {
+    if (payload[0] != MSG_AIRCRAFT_STATE) {
+        Serial.print("[ESP32] unknown msg type: ");
+        Serial.println(payload[0], HEX);
+        return;
+    }
 
-    Wire.begin(I2C_ADDR); // I2C slave, default pins GPIO21(SDA) GPIO22(SCL)
-    Wire.onReceive(onReceive);
-    Wire.onRequest(onRequest);
-    // dont need Serial2 bc from drivers.cpp confirmed no UART assigned to HIL input on ZP,
-    // ZP gets flight state from its own GPS/IMU not from ESP32
+    g_state.altitude_ft      = readI32BE(payload + 1)  / 100.0f;
+    g_state.airspeed_kts     = readI32BE(payload + 5)  / 100.0f;
+    g_state.pitch_deg        = readI32BE(payload + 9)  / 100.0f;
+    g_state.roll_deg         = readI32BE(payload + 13) / 100.0f;
+    g_state.heading_deg      = readI32BE(payload + 17) / 100.0f;
+    g_state.latitude_deg     = readI32BE(payload + 21) / 10000000.0f;
+    g_state.longitude_deg    = readI32BE(payload + 25) / 10000000.0f;
+    g_state.g_force          = readI32BE(payload + 29) / 1000.0f;
+    g_state.roll_rate_rad_s  = readI32BE(payload + 33) / 1000.0f;
+    g_state.pitch_rate_rad_s = readI32BE(payload + 37) / 1000.0f;
+    g_haveState = true;
+
+    Serial.print("[ESP32] state alt_ft=");
+    Serial.print(g_state.altitude_ft, 2);
+    Serial.print(" lat=");
+    Serial.print(g_state.latitude_deg, 7);
+    Serial.print(" lon=");
+    Serial.print(g_state.longitude_deg, 7);
+    Serial.print(" spd_kts=");
+    Serial.println(g_state.airspeed_kts, 2);
 }
 
-void loop() {
-    // UART RX from RPi
-    // static so local vars persist between calls
+uint8_t nmeaChecksum(const char* body) {
+    uint8_t checksum = 0;
+    while (*body) {
+        checksum ^= (uint8_t)(*body++);
+    }
+    return checksum;
+}
+
+float utcTimeFromMillis() {
+    uint32_t ms = millis();
+    uint32_t totalSeconds = (ms / 1000) % 86400;
+    uint32_t hh = totalSeconds / 3600;
+    uint32_t mm = (totalSeconds % 3600) / 60;
+    float ss = (float)(totalSeconds % 60) + (float)(ms % 1000) / 1000.0f;
+    return (float)(hh * 10000 + mm * 100) + ss;
+}
+
+void decimalDegToNmea(float deg, bool isLat, char* out, size_t outLen, char* hemi) {
+    *hemi = deg >= 0.0f ? (isLat ? 'N' : 'E') : (isLat ? 'S' : 'W');
+
+    float absDeg = fabsf(deg);
+    int wholeDeg = (int)absDeg;
+    float minutes = (absDeg - (float)wholeDeg) * 60.0f;
+
+    if (isLat) {
+        snprintf(out, outLen, "%02d%08.5f", wholeDeg, minutes);
+    } else {
+        snprintf(out, outLen, "%03d%08.5f", wholeDeg, minutes);
+    }
+}
+
+void sendNmeaSentence(const char* body) {
+    char sentence[160];
+    snprintf(sentence, sizeof(sentence), "$%s*%02X\r\n", body, nmeaChecksum(body));
+    GPS.print(sentence);
+}
+
+void sendGpsNmea() {
+    char lat[16], lon[16];
+    char ns, ew;
+    decimalDegToNmea(g_state.latitude_deg, true, lat, sizeof(lat), &ns);
+    decimalDegToNmea(g_state.longitude_deg, false, lon, sizeof(lon), &ew);
+
+    float utcTime = utcTimeFromMillis();
+    float altitudeM = g_state.altitude_ft * 0.3048f;
+
+    char body[140];
+
+    // RMC: time, validity, lat/lon, speed in knots, course/heading, date.
+    snprintf(
+        body,
+        sizeof(body),
+        "GPRMC,%09.2f,A,%s,%c,%s,%c,%.3f,%.2f,010126,,,A",
+        utcTime,
+        lat,
+        ns,
+        lon,
+        ew,
+        g_state.airspeed_kts,
+        g_state.heading_deg
+    );
+    sendNmeaSentence(body);
+
+    // GGA: time, lat/lon, fix quality, satellite count, HDOP, altitude in meters.
+    snprintf(
+        body,
+        sizeof(body),
+        "GPGGA,%09.2f,%s,%c,%s,%c,1,12,1.01,%.1f,M,48.0,M,,",
+        utcTime,
+        lat,
+        ns,
+        lon,
+        ew,
+        altitudeM
+    );
+    sendNmeaSentence(body);
+}
+
+void readPiUartPackets() {
     static uint8_t buf[PKT_LEN];
     static int idx = 0;
     static bool synced = false;
 
-    // drain entire buffer every loop to keep up regardless of timing delays
     while (Serial.available()) {
         uint8_t b = Serial.read();
         if (!synced) {
@@ -135,23 +257,67 @@ void loop() {
                 buf[idx++] = b;
                 synced = true;
             }
-        } else {
-            buf[idx++] = b;
-            if (idx == PKT_LEN) {
-                synced = false;
-                if (buf[PKT_LEN - 1] == END) {
-                    uint8_t crc = 0;
-                    for (int i = 1; i < PKT_LEN - 2; i++) crc ^= buf[i];
-                    if (crc == buf[PKT_LEN - 2]) parsePacket(buf + 1);
-                }
-            }
+            continue;
         }
+
+        buf[idx++] = b;
+        if (idx == PKT_LEN) {
+            synced = false;
+
+            if (buf[PKT_LEN - 1] != END) {
+                Serial.println("[ESP32] dropped packet: bad end byte");
+                return;
+            }
+
+            uint8_t crc = 0;
+            for (int i = 1; i < PKT_LEN - 2; i++) {
+                crc ^= buf[i];
+            }
+
+            if (crc != buf[PKT_LEN - 2]) {
+                Serial.println("[ESP32] dropped packet: bad crc");
+                return;
+            }
+
+            parseAircraftStatePayload(buf + 1);
+        } else if (idx >= PKT_LEN) {
+            synced = false;
+            idx = 0;
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200); // Pi <-> ESP32 packet UART over USB for now
+
+    GPS.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+
+    Wire.begin(I2C_ADDR); // I2C slave, default pins GPIO21(SDA) GPIO22(SCL)
+    Wire.onReceive(onReceive);
+    Wire.onRequest(onRequest);
+
+    Serial.println("[ESP32] HIL peripheral emulator ready");
+    Serial.print("[ESP32] GPS spoof UART baud=");
+    Serial.print(GPS_BAUD);
+    Serial.print(" tx=");
+    Serial.print(GPS_TX_PIN);
+    Serial.print(" rx=");
+    Serial.println(GPS_RX_PIN);
+}
+
+void loop() {
+    readPiUartPackets();
+
+    static uint32_t lastGpsMs = 0;
+    uint32_t now = millis();
+    if (now - lastGpsMs >= GPS_PERIOD_MS) {
+        lastGpsMs = now;
+        sendGpsNmea();
     }
 
     // from power_module_iface.hpp: charge and energy are accumulated fields, accumulate here so ZP sees realistic values
     fakeCharge += FAKE_CURRENT * (10.0f / 1000.0f); // amps * dt_sec
     fakeEnergy += FAKE_POWER   * (10.0f / 1000.0f); // watts * dt_sec
 
-    // dont need handleZP() bc from drivers.cpp confirmed ZP has no UART input for flight state
     delay(10); // 100Hz loop
 }
